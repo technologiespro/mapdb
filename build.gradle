@@ -1,0 +1,74 @@
+buildscript {
+
+    //TODO wildcard for dep versions
+    ext.kotlin_version = '1.2.51'
+    ext.junit_version = '5.2.0-M1'
+    ext.ec_version = '9.1.0'
+    ext.guava_version = '20.0'
+
+    repositories {
+        mavenCentral()
+    }
+
+    dependencies {
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+    }
+}
+
+plugins {
+    id "org.jetbrains.dokka" version "0.9.16"
+}
+
+dokka{
+    jdkVersion = 8
+}
+apply plugin: "kotlin"
+
+
+compileKotlin {
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+}
+
+
+sourceSets {
+    main.kotlin.srcDirs += 'src/main/java'
+    main.java.srcDirs += 'src/main/java'
+    test.kotlin.srcDirs += 'src/test/java'
+    test.java.srcDirs += 'src/test/java'
+
+    main.kotlin.srcDirs += 'srcGen/main/java'
+    main.java.srcDirs += 'srcGen/main/java'
+    test.kotlin.srcDirs += 'srcGen/test/java'
+    test.java.srcDirs += 'srcGen/test/java'
+
+}
+
+repositories {
+    mavenCentral()
+}
+
+
+test{
+    maxParallelForks = 5
+    maxHeapSize = '512m'
+}
+
+dependencies {
+    compile "org.eclipse.collections:eclipse-collections-api:$ec_version"
+    compile "org.eclipse.collections:eclipse-collections:$ec_version"
+
+    compile "com.google.guava:guava:$guava_version"
+
+    compile "org.jetbrains.kotlin:kotlin-stdlib-jdk8:$kotlin_version"
+
+    //TODO optional dependencies?
+    compile "com.xenomachina:kotlin-argparser:2.0.7"
+
+    testCompile("io.kotlintest:kotlintest-runner-junit5:3.0.4")
+    testRuntime("org.junit.vintage:junit-vintage-engine:$junit_version")
+
+    testCompile("org.junit.jupiter:junit-jupiter-api:$junit_version")
+    testRuntime("org.junit.jupiter:junit-jupiter-engine:$junit_version")
+}

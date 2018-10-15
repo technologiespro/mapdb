@@ -14,3 +14,9 @@ helper
 *.log
 .gradle
 *.log
+gradlew*
+gradle/*
+
+
+
+srcGen/*

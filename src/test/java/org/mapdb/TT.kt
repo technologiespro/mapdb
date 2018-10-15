@@ -1,11 +1,23 @@
 package org.mapdb
 
+import io.kotlintest.TestCaseConfig
+import io.kotlintest.properties.Gen
+import io.kotlintest.specs.AbstractWordSpec
+import io.kotlintest.specs.WordSpec
 import org.junit.Assert.*
 import org.junit.Test
+import org.mapdb.io.*
+import org.mapdb.serializer.Serializer
+import org.mapdb.serializer.Serializers
+import org.mapdb.store.MutableStore
 import java.io.*
+import java.time.Duration
 import java.util.*
 import java.util.concurrent.*
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.Lock
+import java.util.concurrent.locks.ReadWriteLock
 
 /**
  * Unit tests utils
@@ -16,7 +28,10 @@ object TT{
     val boolsTrue = booleanArrayOf(true)
     val boolsFalse = booleanArrayOf(false)
 
-    @JvmStatic fun randomByteArray(size: Int, seed: Int= Random().nextInt()): ByteArray {
+    val random = Random()
+
+    @JvmStatic
+    fun randomByteArray(size: Int, seed: Int = random.nextInt()): ByteArray {
         var randomSeed = seed
         val ret = ByteArray(size)
         for (i in ret.indices) {
@@ -26,13 +41,13 @@ object TT{
         return ret
     }
 
-    @JvmStatic fun randomFillStore(store:Store, size:Int=1000, seed:Long=Random().nextLong()){
+    @JvmStatic fun randomFillStore(store: MutableStore, size:Int=1000, seed:Long=Random().nextLong()){
         val random = Random(seed)
         for(i in 0..size){
             val bytes = randomByteArray(random.nextInt(100),seed=random.nextInt());
             store.put(
                     bytes,
-                    Serializer.BYTE_ARRAY_NOSIZE);
+                    Serializers.BYTE_ARRAY_NOSIZE);
         }
     }
 
@@ -67,6 +82,13 @@ object TT{
         }
     }
 
+    @JvmStatic fun tempNotExistFile():File{
+        val f = tempFile()
+        f.delete()
+        assertFalse(f.exists())
+        return f
+    }
+
     @JvmStatic fun tempDir(): File {
         val ret = tempFile()
         ret.mkdir()
@@ -92,11 +114,14 @@ object TT{
 
 
     object Serializer_ILLEGAL_ACCESS: Serializer<Any> {
-        override fun serialize(out: DataOutput2, value: Any) {
+
+
+        override fun serializedType() = throw AssertionError("No access")
+        override fun serialize(value: Any, out: DataOutput2) {
             throw AssertionError("Should not access this serializer")
         }
 
-        override fun deserialize(dataIn: DataInput2, available: Int): Any {
+        override fun deserialize(dataIn: DataInput2): Any {
             throw AssertionError("Should not access this serializer")
         }
 
@@ -128,12 +153,11 @@ object TT{
     }
 
     /* clone value using serialization */
-    @JvmStatic fun <E> clone(value: E, serializer: Serializer<*>, out:DataOutput2 = DataOutput2()): E {
-        out.pos = 0
+    @JvmStatic fun <E> clone(value: E, serializer: Serializer<*>, out:DataOutput2 = DataOutput2ByteArray()): E {
         @Suppress("UNCHECKED_CAST")
-        (serializer as Serializer<E>).serialize(out, value)
-        val in2 = DataInput2.ByteArray(out.copyBytes())
-        return serializer.deserialize(in2, out.pos)
+        (serializer as Serializer<E>).serialize(value, out)
+        val in2 = DataInput2ByteArray(out.copyBytes())
+        return serializer.deserialize(in2)
     }
 
     /* clone value using java serialization */
@@ -148,16 +172,12 @@ object TT{
         return ObjectInputStream(in2).readObject() as E
     }
 
-    @JvmStatic fun <E> serializedSize(value: E, serializer: Serializer<*>, out:DataOutput2 = DataOutput2()): Int {
-        out.pos = 0
+    @JvmStatic fun <E> serializedSize(value: E, serializer: Serializer<*>, out:DataOutput2 = DataOutput2ByteArray()): Int {
         @Suppress("UNCHECKED_CAST")
-        (serializer as Serializer<E>).serialize(out, value)
-        return out.pos;
+        (serializer as Serializer<E>).serialize(value, out)
+        return out.copyBytes().size;
     }
 
-    fun <T : Any> forkJvm(clazz:Class<T>, vararg args : String): Process {
-        return JavaProcess.exec(clazz, args)
-    }
 
     fun fork(count:Int=1, body:(i:Int)->Unit){
         val finish = async(count=count, body=body)
@@ -242,10 +262,37 @@ object TT{
         }
     }
 
-    fun <T : Throwable> assertFailsWith(exceptionClass: Class<T>, block: () -> Unit) {
+
+    fun <E> reflectionInvokeMethod(obj:Any, name:String, clazz:Class<*> = obj.javaClass):E{
+        val method = clazz.getDeclaredMethod(name)
+        method.isAccessible = true
+        return method.invoke(obj) as E
+    }
+
+
+    fun <E> reflectionGetField(obj:Any, name:String, clazz:Class<*> = obj.javaClass):E{
+        val field = clazz.getDeclaredField(name)
+        field.isAccessible = true
+        return field.get(obj) as E
+    }
+
+    fun reflectionSetField(obj:Any, newValue:Any?, name:String, clazz:Class<*> = obj.javaClass){
+        val field = clazz.getDeclaredField(name)
+        field.isAccessible = true
+        field.set(obj, newValue)
+    }
+
+
+    /**
+     * Catches expected exception, rethrows everything else.
+     *
+     * Compared to [kotlin.test.assertFailsWith] does not swallow wrong exceptions, better for debuging
+     *
+     */
+    inline fun <T : Throwable> assertFailsWith(exceptionClass: kotlin.reflect.KClass<T>, block: () -> Unit) {
         try {
             block()
-            fail("Expected exception ${exceptionClass.name}")
+            fail("Expected exception ${exceptionClass}")
         } catch (e: Throwable) {
             if (exceptionClass.isInstance(e)) {
                 @Suppress("UNCHECKED_CAST")
@@ -255,6 +302,94 @@ object TT{
         }
     }
 
+
+    inline fun withTempFile(f:(file:File)->Unit){
+        val file = TT.tempFile()
+        file.delete();
+        try{
+            f(file)
+        }finally {
+            if(!file.delete())
+                file.deleteOnExit()
+        }
+    }
+
+
+    inline fun withTempDir(f:(dir:File)->Unit){
+        val dir = TT.tempDir()
+        try{
+            f(dir)
+        }finally {
+            dir.deleteRecursively()
+        }
+    }
+
+
+    object byteArrayGen : Gen<ByteArray> {
+        override fun random(): Sequence<ByteArray> = generateSequence {
+            randomByteArray(random.nextInt(100))
+        }
+
+        override fun always(): Iterable<ByteArray> = listOf(
+                ByteArray(0), byteArrayOf(-1, -1), byteArrayOf(1, 2, 3), byteArrayOf(0))
+
+    }
+
+
+    data class TestPojo(val a:String, val b:String):Serializable
+
+    /** random generator of any type */
+    object anyGen: Gen<Any>{
+        override fun always(): Iterable<Any> {
+            return listOf(1,2, 4L, listOf(1,2,4), "aa", TestPojo("aa", "bb"))
+        }
+
+        override fun random(): Sequence<Any> =
+            generateSequence {
+                Math.random()
+            }
+
+    }
+
+    fun genFor(cl: Class<*>?): Gen<Any> = when (cl) {
+
+        java.lang.Integer::class.java -> Gen.int()
+        java.lang.Long::class.java -> Gen.long()
+        java.lang.Double::class.java -> Gen.double()
+        java.lang.String::class.java -> Gen.string()
+        ByteArray::class.java -> byteArrayGen
+        null -> anyGen // generic serializers
+
+        else -> throw AssertionError("unknown class $cl")
+    }
+
+    inline fun withBool(run:(b: AtomicBoolean)->Unit) {
+        val b = AtomicBoolean(true)
+        try {
+            run.invoke(b)
+        }finally {
+            b.set(false)
+        }
+    }
+
+    fun installValidateReadWriteLock(v:Validate, fieldName:String){
+        val origLock = reflectionGetField<ReadWriteLock>(v, fieldName, v.javaClass)
+
+        val writeVLock = object:Lock by origLock.writeLock(){
+            override fun unlock() {
+               origLock.writeLock().unlock()
+                v.validate()
+            }
+        }
+
+        val vLock = object:ReadWriteLock by origLock{
+            override fun writeLock(): Lock {
+                return writeVLock
+            }
+        }
+
+        reflectionSetField(v, vLock, fieldName, v.javaClass)
+    }
 
 }
 
@@ -280,7 +415,7 @@ class TTTest{
 
     @Test fun clone2(){
         val s = "djwqoidjioqwdjiqw 323423";
-        assertEquals(s, TT.clone(s, Serializer.STRING))
+        assertEquals(s, TT.clone(s, Serializers.STRING))
         assertEquals(s, TT.cloneJavaSerialization(s))
     }
 
@@ -288,4 +423,16 @@ class TTTest{
         val f = TT.tempFile()
         assertTrue(f.name,f.name.startsWith("mapdbTest_org.mapdb.TTTest-tempFileName_textets-"))
     }
+}
+
+
+abstract class DBWordSpec(body: AbstractWordSpec.() -> Unit = {})  : WordSpec(body) {
+
+    private val duration =
+            if(TT.shortTest()) Duration.ofSeconds(2)
+            else Duration.ofHours(12)
+
+    override val defaultTestCaseConfig = TestCaseConfig(
+            timeout = duration)
+
 }
